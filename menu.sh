@@ -162,7 +162,7 @@ select_packages() {
     done
 
     show_header "$category"
-    show_instructions "SPACE to select | ENTER to confirm | ESC to go back"
+    show_instructions "SPACE or "X" to select | ENTER to go Back"
     show_status_bar
 
     # Calculate available height for the menu
