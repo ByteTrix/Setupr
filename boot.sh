@@ -20,14 +20,82 @@ elif [ "$EUID" -ne 0 ]; then
     exit 1
 fi
 
+# Check system compatibility
+check_system_compatibility() {
+    echo "Checking system compatibility..."
+    
+    # Check if we are on a Debian-based system (Ubuntu, Debian, etc.)
+    if ! command -v apt-get &>/dev/null; then
+        echo "Error: This script requires a Debian-based system (Ubuntu, Debian, etc.)"
+        return 1
+    fi
+    
+    # Check if we can use sudo
+    if ! sudo -n true 2>/dev/null; then
+        echo "Sudo access required. Please run with sudo privileges."
+        return 1
+    fi
+    
+    # Basic internet connectivity check
+    if ! ping -c 1 google.com &>/dev/null && ! ping -c 1 github.com &>/dev/null; then
+        echo "Error: Internet connectivity is required for installation."
+        return 1
+    fi
+    
+    # Check available disk space (at least 5GB free on /)
+    local available_space
+    available_space=$(df -k / | awk 'NR==2 {print $4}')
+    if [ "$available_space" -lt 5242880 ]; then # 5GB in KB
+        echo "Error: Insufficient disk space. At least 5GB of free space is required on /"
+        echo "Available space: $(( available_space / 1024 / 1024 ))GB"
+        return 1
+    fi
+    
+    return 0
+}
 
-# Install dependency: gum
+# Run system compatibility check
+if ! check_system_compatibility; then
+    echo "System compatibility check failed. Please fix the issues and try again."
+    exit 1
+fi
+
+# Install essential prerequisites
+install_prerequisites() {
+    echo "Installing essential prerequisites..."
+    # Update package lists
+    sudo apt-get update
+    
+    # Install core dependencies required for proper installation
+    sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+        curl \
+        gnupg \
+        wget \
+        git \
+        
+    # Check if build-essential is installed
+    if ! dpkg -l | grep -q "^ii.*build-essential"; then
+        echo "Installing build-essential package..."
+        sudo DEBIAN_FRONTEND=noninteractive apt-get install -y build-essential
+    fi
+}
+
+# Check and install all necessary dependencies
 install_dependencies() {
+    # Make sure prerequisites are installed first
+    install_prerequisites
+    
+    # Then install gum if not already installed
     if ! command -v gum &>/dev/null; then
         echo "Installing dependency: gum..."
-        if curl -fsSL https://repo.charm.sh/apt/gpg.key | sudo apt-key add -; then
-            echo "deb [arch=amd64] https://repo.charm.sh/apt/ * *" | \
+        
+        # Use modern method for adding repository keys
+        if sudo mkdir -p /etc/apt/keyrings && \
+           curl -fsSL https://repo.charm.sh/apt/gpg.key | sudo gpg --dearmor -o /etc/apt/keyrings/charm.gpg; then
+            
+            echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/charm.gpg] https://repo.charm.sh/apt/ * *" | \
                 sudo tee /etc/apt/sources.list.d/charm.list
+                
             sudo apt-get update -o Dir::Etc::sourcelist="/etc/apt/sources.list.d/charm.list" \
                 -o Dir::Etc::sourceparts="-" -o APT::Get::List-Cleanup="0"
             sudo DEBIAN_FRONTEND=noninteractive apt-get install -y gum
@@ -36,13 +104,40 @@ install_dependencies() {
             exit 1
         fi
     fi
+    
+    # Make sure git is installed for cloning the repository
+    if ! command -v git &>/dev/null; then
+        echo "Git not found. Installing git..."
+        sudo DEBIAN_FRONTEND=noninteractive apt-get install -y git
+    fi
 }
 
 # Main installation variables
 INSTALL_DIR="/usr/local/share/Setupr"
 USER_HOME=$(eval echo ~${SUDO_USER})
 
+# Fix common APT issues that might prevent successful installation
+fix_apt_issues() {
+    echo "Checking and fixing common APT issues..."
+    
+    # Clear any dpkg locks or interrupted installations
+    if [ -f /var/lib/dpkg/lock ] || [ -f /var/lib/apt/lists/lock ] || [ -f /var/cache/apt/archives/lock ]; then
+        echo "Clearing package manager locks..."
+        sudo rm -f /var/lib/dpkg/lock
+        sudo rm -f /var/lib/apt/lists/lock
+        sudo rm -f /var/cache/apt/archives/lock
+        sudo dpkg --configure -a
+    fi
+    
+    # Fix any broken packages
+    sudo apt-get update --fix-missing
+    sudo apt-get install -f -y
+    
+    echo "APT issues fixed."
+}
+
 # Execute setup functions
+fix_apt_issues
 install_dependencies
 
 # Prepare the user environment
@@ -83,13 +178,48 @@ if ! git clone -b v2.2 https://github.com/ByteTrix/Setupr.git "$INSTALL_DIR"; th
     exit 1
 fi
 
-# Set executable permissions and ownership
-chmod +x "$INSTALL_DIR"/{install,check-version,system-update}.sh
+# Set executable permissions and ownership for all scripts
+chmod +x "$INSTALL_DIR"/{install,check-version,system-update,essential-tools}.sh
 chmod +x "$INSTALL_DIR"/modules/*/*.sh 2>/dev/null || true
 chown -R "${SUDO_USER}:${SUDO_USER}" "$INSTALL_DIR"
 
-# Source utility functions and run system update
+# Source utility functions
 source "${INSTALL_DIR}/lib/utils.sh"
+
+# Install essential tools first
+log_info "Installing essential tools first..."
+sudo -E TERM="$TERM" bash "$INSTALL_DIR/essential-tools.sh"
+
+# Verify essential tools were installed
+verify_essentials() {
+    log_info "Verifying essential tools installation..."
+    local missing_tools=()
+    
+    # Check for critical tools
+    for tool in curl wget git jq gdebi-core snapd; do
+        if ! command -v "$tool" &>/dev/null; then
+            missing_tools+=("$tool")
+        fi
+    done
+    
+    # Report if any tools are missing
+    if [ "${#missing_tools[@]}" -ne 0 ]; then
+        log_warn "Some essential tools could not be installed: ${missing_tools[*]}"
+        log_warn "Attempting to install them again..."
+        
+        # Try to install the missing tools directly
+        if [ "${#missing_tools[@]}" -gt 0 ]; then
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y "${missing_tools[@]}"
+        fi
+    else
+        log_success "All essential tools are installed!"
+    fi
+}
+
+# Run the verification
+verify_essentials
+
+# Run system update next
 log_info "Running system update..."
 sudo -E TERM="$TERM" bash "$INSTALL_DIR/system-update.sh"
 
